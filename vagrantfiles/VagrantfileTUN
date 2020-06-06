@@ -1,0 +1,173 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+MACHINES = {
+ :openvpnServerOffice1 => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.0.2', adapter: 2, netmask: "255.255.255.248", virtualbox__intnet: "internet"},
+                   {ip: '192.168.10.1', adapter: 3, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet1"} # intnet это vlan
+               ]
+  },
+
+ :openvpnClientGatewayOffice2 => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.0.3', adapter: 2, netmask: "255.255.255.248", virtualbox__intnet: "internet"},
+                   {ip: '192.168.20.1', adapter: 3, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet2"}
+               ]
+  },
+
+  :office1Computer => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.10.2', adapter: 2, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet1"}
+                ]
+  },
+  
+  :office2Computer => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.20.2', adapter: 2, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet2"}
+                ]
+  }
+
+}
+
+Vagrant.configure("2") do |config|
+
+  MACHINES.each do |boxname, boxconfig|
+
+    config.vm.define boxname do |box|
+
+        box.vm.box = boxconfig[:box_name]
+        box.vm.host_name = boxname.to_s
+
+        config.vm.provider "virtualbox" do |v|
+          v.memory = 256
+        end
+
+        boxconfig[:net].each do |ipconf|
+          box.vm.network "private_network", ipconf
+        end
+        
+        if boxconfig.key?(:public)
+          box.vm.network "public_network", boxconfig[:public]
+        end
+
+        box.vm.provision "shell", inline: <<-SHELL
+          mkdir -p ~root/.ssh
+                cp ~vagrant/.ssh/auth* ~root/.ssh
+        SHELL
+        
+        # Директивы говорящие что надо использовать вход в гостевые машины используя логин и пароль
+        #config.ssh.username = 'vagrant'
+        #config.ssh.password = 'vagrant'
+        #config.ssh.insert_key = false
+        #config.ssh.connect_timeout = 5
+
+
+        case boxname.to_s
+        when "openvpnServerOffice1"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+            
+            # Установка софта
+            sudo yum install -y epel-release; sudo yum install -y tcpdump iperf3 wget nano openvpn iptables-services; sudo systemctl enable iptables && sudo systemctl start iptables;
+
+            # Отключение файервола
+            sudo setenforce 0
+            sudo sed -i 's/=enforcing/=disabled/g' /etc/selinux/config
+            
+            # Включаем форвардинг
+            sudo bash -c 'echo "net.ipv4.conf.all.forwarding=1" >> /etc/sysctl.conf'; sudo sysctl -p
+            
+            # Очищаем таблицы iptables
+            sudo iptables -P INPUT ACCEPT
+            sudo iptables -P FORWARD ACCEPT
+            sudo iptables -P OUTPUT ACCEPT
+            sudo iptables -t nat -F
+            sudo iptables -t mangle -F
+            sudo iptables -F
+            sudo iptables -X
+
+            # Для того чтобы с сервера и шлюза (клиента) можно было пинговать компьютеры в филиалах надо включить маскарадинг (клиенты и так могут друг друга пинговать)
+            sudo iptables -t nat -A POSTROUTING -o eth2 -j MASQUERADE
+            sudo service iptables save
+            
+            # Создание необходимых директорий
+            sudo mkdir /etc/openvpn/ccd && sudo mkdir /var/log/openvpn
+
+            # Копируем файлы конфигурации и сертификаты
+            cp /vagrant/config/server/server.conf /etc/openvpn/server.conf; cp /vagrant/config/server/ccd/client /etc/openvpn/ccd/client
+            cp -r /vagrant/certs/server/* /etc/openvpn/ 
+            #sudo chown root:root /etc/knockd.conf; sudo chmod 600 /etc/knockd.conf
+            #sudo chown root:root /etc/sysconfig/knockd; sudo chmod 644 /etc/sysconfig/knockd
+
+            # Включение openvpn
+            sudo systemctl enable openvpn@server && sudo systemctl start openvpn@server
+            
+            SHELL
+
+          #box.vm.provision "shell", path: "./files/sed.sh"
+    
+        when "openvpnClientGatewayOffice2"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+            # Форвардинг
+            sudo bash -c 'echo "net.ipv4.conf.all.forwarding=1" >> /etc/sysctl.conf'; sudo sysctl -p
+
+            # Отключение файервола
+            sudo setenforce 0
+            sudo sed -i 's/=enforcing/=disabled/g' /etc/selinux/config
+
+            # Установка софта для того чтобы можно было сохранить правила iptables после перезагрузки
+            sudo yum install -y epel-release; sudo yum install -y iptables-services; sudo systemctl enable iptables && sudo systemctl start iptables; sudo yum install -y tcpdump iperf3 wget nano openvpn
+            
+            # Очистка правил iptables
+            sudo iptables -P INPUT ACCEPT
+            sudo iptables -P FORWARD ACCEPT
+            sudo iptables -P OUTPUT ACCEPT
+            sudo iptables -t nat -F
+            sudo iptables -t mangle -F
+            sudo iptables -F
+            sudo iptables -X
+
+            # Для того чтобы с сервера и шлюза (клиента) можно было пинговать компьютеры в филиалах надо включить маскарадинг (клиенты и так могут друг друга пинговать)
+            sudo iptables -t nat -A POSTROUTING -o eth2 -j MASQUERADE
+            sudo service iptables save
+
+            # Создание необходимых директорий
+            sudo mkdir /var/log/openvpn
+
+            # Копируем файлы конфигурации и сертификаты
+            cp /vagrant/config/client/client.conf /etc/openvpn/client.conf
+            cp -r /vagrant/certs/client/* /etc/openvpn/ 
+
+            # Включение openvpn
+            sudo systemctl enable openvpn@client && sudo systemctl start openvpn@client
+      
+            SHELL
+        when "office1Computer"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+
+            # Установка софта; Форвардинг для прохождения транзитного траффика; Установка шлюза на eth1 и удаление на eth0
+            sudo yum install -y epel-release; sudo yum install -y tcpdump iperf3 wget nano
+            sudo bash -c 'echo "192.168.20.0/24 via 192.168.10.1 dev eth1" >> /etc/sysconfig/network-scripts/route-eth1'
+            sudo reboot
+            SHELL
+        when "office2Computer"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+
+            # Установка софта, сетевые настройки шлюза
+            sudo yum install -y epel-release; sudo yum install -y tcpdump iperf3 wget nano
+            sudo bash -c 'echo "192.168.10.0/24 via 192.168.20.1 dev eth1" >> /etc/sysconfig/network-scripts/route-eth1'
+            sudo reboot
+            SHELL
+        
+        end
+
+      end
+
+  end
+  
+  
+end

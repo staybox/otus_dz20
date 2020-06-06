@@ -1,0 +1,126 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+MACHINES = {
+ :openvpnServerOffice1 => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.0.1', adapter: 2, netmask: "255.255.255.0", virtualbox__intnet: "internet"},
+                   {ip: '192.168.10.1', adapter: 3, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet1"}
+               ]
+  },
+
+ :openvpnClientGatewayOffice2 => {
+        :box_name => "centos/7",
+        :net => [
+                   {ip: '192.168.0.2', adapter: 2, netmask: "255.255.255.0", virtualbox__intnet: "internet"},
+                   {ip: '192.168.20.1', adapter: 3, netmask: "255.255.255.0", virtualbox__intnet: "officeSubnet2"}
+               ]
+  }
+
+}
+
+Vagrant.configure("2") do |config|
+
+  MACHINES.each do |boxname, boxconfig|
+
+    config.vm.define boxname do |box|
+
+        box.vm.box = boxconfig[:box_name]
+        box.vm.host_name = boxname.to_s
+
+        config.vm.provider "virtualbox" do |v|
+          v.memory = 256
+        end
+
+        boxconfig[:net].each do |ipconf|
+          box.vm.network "private_network", ipconf
+        end
+        
+        if boxconfig.key?(:public)
+          box.vm.network "public_network", boxconfig[:public]
+        end
+
+        box.vm.provision "shell", inline: <<-SHELL
+          mkdir -p ~root/.ssh
+                cp ~vagrant/.ssh/auth* ~root/.ssh
+        SHELL
+        
+        # Директивы говорящие что надо использовать вход в гостевые машины используя логин и пароль
+        #config.ssh.username = 'vagrant'
+        #config.ssh.password = 'vagrant'
+        #config.ssh.insert_key = false
+        #config.ssh.connect_timeout = 5
+
+
+        case boxname.to_s
+        when "openvpnServerOffice1"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+            
+            # Установка софта
+            sudo yum install -y epel-release; sudo yum install -y tcpdump iperf3 wget nano openvpn iptables-services bridge-utils net-tools; sudo systemctl enable iptables && sudo systemctl start iptables;
+
+            # Отключение файервола
+            sudo setenforce 0
+            sudo sed -i 's/=enforcing/=disabled/g' /etc/selinux/config
+                      
+            # Очищаем таблицы iptables
+            sudo iptables -P INPUT ACCEPT
+            sudo iptables -P FORWARD ACCEPT
+            sudo iptables -P OUTPUT ACCEPT
+            sudo iptables -t nat -F
+            sudo iptables -t mangle -F
+            sudo iptables -F
+            sudo iptables -X
+            sudo service iptables save
+            
+            # Создание необходимых директорий
+            sudo mkdir /var/log/openvpn
+
+            # Копируем файлы конфигурации и сертификаты
+            cp -r /vagrant/tap/server/server.conf /etc/openvpn/; cp /vagrant/tap/key/static.key /etc/openvpn/
+
+            # Включение openvpn
+            sudo systemctl enable openvpn@server && sudo systemctl start openvpn@server
+            
+            SHELL
+         
+        when "openvpnClientGatewayOffice2"
+          box.vm.provision "shell", run: "always", inline: <<-SHELL
+            
+            # Отключение файервола
+            sudo setenforce 0
+            sudo sed -i 's/=enforcing/=disabled/g' /etc/selinux/config
+
+            # Установка софта для того чтобы можно было сохранить правила iptables после перезагрузки
+            sudo yum install -y epel-release; sudo yum install -y iptables-services bridge-utils net-tools; sudo systemctl enable iptables && sudo systemctl start iptables; sudo yum install -y tcpdump iperf3 wget nano openvpn
+            
+            # Очистка правил iptables
+            sudo iptables -P INPUT ACCEPT
+            sudo iptables -P FORWARD ACCEPT
+            sudo iptables -P OUTPUT ACCEPT
+            sudo iptables -t nat -F
+            sudo iptables -t mangle -F
+            sudo iptables -F
+            sudo iptables -X
+            sudo service iptables save
+
+            # Создание необходимых директорий
+            sudo mkdir /var/log/openvpn
+
+            # Копируем файлы конфигурации и сертификаты
+            cp /vagrant/tap/client/client.conf /etc/openvpn/client.conf; cp /vagrant/tap/key/static.key /etc/openvpn/
+
+            # Включение openvpn
+            sudo systemctl enable openvpn@client && sudo systemctl start openvpn@client
+      
+            SHELL
+        
+        end
+
+      end
+
+  end
+  
+  
+end
